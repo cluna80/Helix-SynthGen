@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #040810;
+  --green: #00ff88;
+  --cyan: #00d4ff;
+  --amber: #ffcc00;
+  --orange: #ff7b45;
+  --red: #ff2244;
+  --text: #8fffd4;
+  --panel: rgba(0, 220, 120, 0.04);
+  --border: rgba(0, 220, 120, 0.2);
+  --f-display: 'Arial Black', Gadget, sans-serif;
+  --f-mono: 'Courier New', Courier, monospace;
+}
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--f-mono);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: repeating-linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%),
+              repeating-linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+  background-size: 100% 4px, 3px 100%;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.panel {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-sizing: border-box;
+}
+
+.panel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--green), transparent);
+  opacity: 0.6;
+}
+
+.glow-green {
+  text-shadow: 0 0 10px var(--green);
+}
+
+.pulsing {
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 0.4; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.1); }
+  100% { opacity: 0.4; transform: scale(0.9); }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  50% { transform: translateX(4px); }
+  75% { transform: translateX(-4px); }
+}
+
+.animate-shake {
+  animation: shake 0.3s cubic-bezier(.36,.07,.19,.97) both;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #020408;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--green);
+}
