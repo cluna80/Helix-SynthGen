@@ -1,5 +1,24 @@
 import React, { useState, useEffect, useRef } from 'react';
 
+const LOBSTER_TRAP_URL = 'http://localhost:8080';
+const PROXY_MODE = true;
+
+interface SecurityEvent {
+  time: string;
+  action: 'ALLOW' | 'DENY' | 'QUARANTINE' | 'HUMAN_REVIEW' | 'LOG';
+  agent: string;
+  reason: string;
+  riskScore: number;
+  intentCategory: string;
+}
+
+const DEMO_SECURITY_EVENTS: SecurityEvent[] = [
+  { time: '00:00:01', action: 'ALLOW', agent: 'HELIX-SCOUT', reason: 'Intent: pharmaceutical-analysis', riskScore: 1.2, intentCategory: 'research' },
+  { time: '00:00:02', action: 'LOG', agent: 'HELIX-SCOUT', reason: 'Bio-threat keywords detected — logged', riskScore: 3.1, intentCategory: 'bio-defense' },
+  { time: '00:00:45', action: 'ALLOW', agent: 'HELIX-FORGE', reason: 'Intent: drug-synthesis-research', riskScore: 2.4, intentCategory: 'pharmaceutical' },
+  { time: '00:01:12', action: 'ALLOW', agent: 'HELIX-CHAIN', reason: 'Intent: supply-chain-logistics', riskScore: 0.8, intentCategory: 'procurement' },
+];
+
 const DEMO_INTEL = `THREAT_ID: BIO-2026-Δ7-K103
 THREAT_CLASS: Engineered NNRTI-resistant HIV-1 RT variant
 TARGET_PROTEIN: HIV-1 Reverse Transcriptase (p66/p51)
@@ -66,19 +85,61 @@ const SYSTEM_INTEL = `You are HELIX-SCOUT, an autonomous bio-threat analysis age
 const SYSTEM_SYNTH = `You are HELIX-FORGE, an autonomous drug discovery agent. Design exactly 3 lead compounds. For each: COMPOUND_ID, SMILES, R_GROUP_MODIFICATION, PRED_BINDING (kcal/mol), ADMET_FLAGS, SYNTHESIS_STEPS, PRIORITY. End with LEAD_RECOMMENDATION and REQUIRED_PRECURSORS.`;
 const SYSTEM_SUPPLY = `You are HELIX-CHAIN, an autonomous supply chain agent. Create a procurement plan. For each precursor: CHEMICAL_NAME, CAS_NUMBER, QUANTITY_KG, SUPPLIER (Sigma-Aldrich / TCI America / Combi-Blocks / Oakwood Chemical), LEAD_TIME_HOURS, AVAILABILITY_STATUS. End with TOTAL_ACQUISITION_TIME, SYNTHESIS_START_ETA, MISSION_COMPLETION_ETA, CONFIDENCE_PCT.`;
 
-async function callGemini(systemPrompt: string, userPrompt: string, apiKey: string) {
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      system_instruction: { parts: [{ text: systemPrompt }] },
-      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-      generationConfig: { temperature: 0.7, maxOutputTokens: 900 }
-    })
-  });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
-  return data.candidates[0].content.parts[0].text;
+async function callGemini(systemPrompt: string, userPrompt: string, apiKey: string, onSecurityEvent?: (e: Omit<SecurityEvent, 'time'>) => void, agentName?: string) {
+  if (PROXY_MODE) {
+    const res = await fetch(`${LOBSTER_TRAP_URL}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'x-lobstertrap-backend': 'gemini',
+        'x-lobstertrap-declared-intent': 'bio-threat-analysis',
+        ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {})
+      },
+      body: JSON.stringify({
+        _lobstertrap: {
+          declared_intent: 'bio-threat-analysis',
+          agent_id: agentName,
+          classification: 'confidential',
+          audit_required: true
+        },
+        system_instruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+        generationConfig: { temperature: 0.7, maxOutputTokens: 900 }
+      })
+    });
+    
+    if (onSecurityEvent && agentName) {
+      const action = res.headers.get('x-lobstertrap-action') as SecurityEvent['action'] || 'ALLOW';
+      onSecurityEvent({
+        action,
+        agent: agentName,
+        reason: res.headers.get('x-lobstertrap-deny-reason') || 'DPI proxy inspection clear',
+        riskScore: parseFloat(res.headers.get('x-lobstertrap-risk-score') || '0.0'),
+        intentCategory: res.headers.get('x-lobstertrap-intent-category') || 'general'
+      });
+
+      if (['DENY', 'QUARANTINE', 'HUMAN_REVIEW'].includes(action)) {
+        throw new Error(`Execution halted by Lobster Trap DPI: ${action}`);
+      }
+    }
+    
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.candidates[0].content.parts[0].text;
+  } else {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+        generationConfig: { temperature: 0.7, maxOutputTokens: 900 }
+      })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.candidates[0].content.parts[0].text;
+  }
 }
 
 const easeOutCubic = (x: number): number => {
@@ -541,6 +602,79 @@ const AgentCard = ({ agent }: { agent: any; key?: string }) => {
 };
 
 
+const SecurityMonitor = ({ events, proxyOnline }: { events: SecurityEvent[], proxyOnline: boolean | null }) => {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [events]);
+
+  const stats = {
+    inspected: events.length,
+    allowed: events.filter(e => e.action === 'ALLOW').length,
+    blocked: events.filter(e => ['DENY', 'QUARANTINE'].includes(e.action)).length,
+    avgRisk: events.length ? (events.reduce((acc, e) => acc + e.riskScore, 0) / events.length).toFixed(1) : '0.0'
+  };
+
+  const getLogColor = (action: string) => {
+    switch(action) {
+      case 'ALLOW': return 'text-[var(--green)]';
+      case 'LOG': return 'text-[var(--cyan)]';
+      case 'HUMAN_REVIEW': return 'text-[var(--amber)]';
+      case 'QUARANTINE': return 'text-[var(--orange)]';
+      case 'DENY': return 'text-[var(--red)]';
+      default: return 'text-white/70';
+    }
+  };
+
+  return (
+    <div 
+      className="panel border-l-2 flex flex-col overflow-hidden"
+      style={{ borderLeftColor: 'var(--orange)', boxShadow: 'inset 5px 0 15px -10px var(--orange)' }}
+    >
+      <div className="p-3 flex justify-between items-center shrink-0 border-b border-white/5">
+        <h3 className="font-bold tracking-wider uppercase text-[var(--orange)]" style={{ fontFamily: 'var(--f-display)' }}>
+          LOBSTER TRAP
+        </h3>
+        <div className="flex items-center gap-2 border border-white/20 px-2 py-0.5 rounded-full">
+           <div className={`w-1.5 h-1.5 rounded-full ${proxyOnline ? 'bg-[var(--green)] animate-pulse' : 'bg-white/30'}`} />
+           <span className="text-[9px] uppercase opacity-70">DPI PROXY</span>
+        </div>
+      </div>
+      
+      <div className="flex bg-black/40 border-b border-white/5 p-2 gap-2 text-[9px] font-mono tracking-widest shrink-0">
+         <div className="flex-1 flex flex-col items-center border-[var(--green)]/30 border p-1 rounded"><span className="opacity-50">INSPECTED</span><span className="text-[var(--green)]">{stats.inspected}</span></div>
+         <div className="flex-1 flex flex-col items-center border-[var(--cyan)]/30 border p-1 rounded"><span className="opacity-50">ALLOWED</span><span className="text-[var(--cyan)]">{stats.allowed}</span></div>
+         <div className="flex-1 flex flex-col items-center border-[var(--red)]/30 border p-1 rounded"><span className="opacity-50">BLOCKED</span><span className="text-[var(--red)]">{stats.blocked}</span></div>
+         <div className="flex-1 flex flex-col items-center border-[var(--amber)]/30 border p-1 rounded"><span className="opacity-50">AVG RISK</span><span className="text-[var(--amber)] border-l-0 pl-0">{stats.avgRisk}</span></div>
+      </div>
+
+      <div ref={scrollRef} className="flex-1 p-2 flex flex-col gap-1.5 font-mono overflow-y-auto text-[9px]">
+         {events.map((e, i) => (
+            <div key={i} className="flex flex-col gap-1 border-b border-white/5 pb-1.5 last:border-0 last:pb-0">
+               <div className="flex justify-between items-start">
+                  <span className="text-white/40">{e.time}</span>
+                  <span className={`font-bold ${getLogColor(e.action)}`}>[{e.action}]</span>
+               </div>
+               <div className="flex flex-col opacity-80 leading-tight">
+                  <span className="text-[10px] text-[var(--cyan)] font-bold">{e.agent}</span>
+                  <span className="truncate" title={e.reason}>{e.reason}</span>
+                  <div className="flex justify-between opacity-50 text-[8px] mt-0.5">
+                     <span>RISK: {e.riskScore}</span>
+                     <span>CAT: {e.intentCategory.toUpperCase()}</span>
+                  </div>
+               </div>
+            </div>
+         ))}
+      </div>
+      
+      <div className="p-2 text-[8px] opacity-60 border-t border-white/5 font-mono tracking-widest text-center truncate">
+        INJECT_DETECT · EXFIL_GUARD · BIOWEAPON_FLAG · AUDIT_ALL
+      </div>
+    </div>
+  );
+};
+
+
 const PRESETS: Record<string, string> = {
   'HIV-RT VARIANT': "THREAT: Synthetic pathogen SYN-2026-Δ7. Modified HIV-1 RT with K103N+E138K+V179D triple resistance. Aerosol-enhanced. 3 confirmed, 47 projected in 72h.",
   'ANTHRAX ANALOG': "THREAT: Engineered Bacillus anthracis variant BA-X9. Modified protective antigen with altered LF binding domain. Antibiotic-resistant (ciprofloxacin MIC >32). Spore dispersal confirmed, 5 exposure sites.",
@@ -557,10 +691,37 @@ export default function App() {
   
   const [logs, setLogs] = useState([{ time: '00:00:00', text: 'HELIX SYNTHGEN INITIALIZED. STANDING BY FOR PROTOCOL INITIATION...' }]);
   
+  const [securityEvents, setSecurityEvents] = useState<SecurityEvent[]>([]);
+  const [proxyOnline, setProxyOnline] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let interval = setInterval(async () => {
+       try {
+          const res = await fetch(`${LOBSTER_TRAP_URL}/health`);
+          setProxyOnline(res.ok);
+       } catch {
+          setProxyOnline(false);
+       }
+    }, 10000);
+    fetch(`${LOBSTER_TRAP_URL}/health`).then(res => setProxyOnline(res.ok)).catch(() => setProxyOnline(false));
+    return () => clearInterval(interval);
+  }, []);
+
   const addLog = (text: string) => {
     const now = new Date();
     const timeStr = now.toISOString().substring(11, 19);
     setLogs(prev => [...prev, { time: timeStr, text }]);
+  };
+
+  const addSecurityEvent = (e: Omit<SecurityEvent, 'time'>) => {
+     const event: SecurityEvent = {
+        ...e,
+        time: new Date().toISOString().substring(11, 19)
+     };
+     setSecurityEvents(prev => [...prev, event]);
+     if (['DENY', 'QUARANTINE', 'HUMAN_REVIEW'].includes(event.action)) {
+        addLog(`LOBSTER TRAP INTERVENTION: [${event.action}] on ${event.agent} - ${event.reason}`);
+     }
   };
 
   const logsRef = useRef<HTMLDivElement>(null);
@@ -661,6 +822,7 @@ export default function App() {
     setMetrics(prev => prev.map(m => ({ ...m, val: m.start })));
     setLogs([{ time: new Date().toISOString().substring(11, 19), text: 'HELIX SYNTHGEN INITIALIZED. STANDING BY FOR PROTOCOL INITIATION...' }]);
     setKeyError(false);
+    setSecurityEvents([]);
   };
 
   const startOrchestration = async (isDemo: boolean) => {
@@ -681,11 +843,13 @@ export default function App() {
     
     setAgents(prev => prev.map(a => ({ ...a, status: 'IDLE', output: '', elapsed: 0 })));
     setMetrics(prev => prev.map(m => ({ ...m, val: m.start })));
+    setSecurityEvents([]);
     
     addLog(`PROTOCOL INITIATED (${isDemo ? 'DEMO' : 'LIVE'} MODE).`);
 
     const runAgent = async (index: number, promptInput: string, systemPrompt: string, demoResult: string) => {
       updateAgent(index, { status: 'RUNNING', output: '', elapsed: 0 });
+      const currentAgentName = ['HELIX-SCOUT', 'HELIX-FORGE', 'HELIX-CHAIN'][index];
       let agentInterval = setInterval(() => {
         setAgents(prev => {
           const n = [...prev];
@@ -697,8 +861,11 @@ export default function App() {
       let resultText = '';
       try {
         if (!isDemo && apiKey) {
-          resultText = await callGemini(systemPrompt, promptInput, apiKey);
+          resultText = await callGemini(systemPrompt, promptInput, apiKey, addSecurityEvent, currentAgentName);
         } else {
+          DEMO_SECURITY_EVENTS.filter(e => e.agent === currentAgentName).forEach((e, i) => {
+             setTimeout(() => addSecurityEvent(e), (i + 1) * 350);
+          });
           await new Promise(r => setTimeout(r, 600));
           resultText = demoResult;
         }
@@ -750,6 +917,15 @@ export default function App() {
             <div className="border border-[var(--green)] text-[var(--green)] px-2 py-0.5 rounded text-[9px] font-bold opacity-70 pulsing tracking-widest whitespace-nowrap">
               ⬡ MCP-SECURED
             </div>
+            {proxyOnline ? (
+              <div className="border border-[var(--orange)] text-[var(--orange)] bg-[var(--orange)]/10 px-2 py-0.5 rounded text-[9px] font-bold tracking-widest whitespace-nowrap">
+                 🦞 LOBSTER TRAP ONLINE
+              </div>
+            ) : (
+              <div className="border border-white/20 text-white/40 px-2 py-0.5 rounded text-[9px] font-bold tracking-widest whitespace-nowrap">
+                 🦞 PROXY OFFLINE
+              </div>
+            )}
           </div>
           <span className="text-[10px] tracking-[0.2em] font-bold uppercase" style={{ color: 'var(--cyan)' }}>
             AUTONOMOUS BIO-DEFENSE SYNTHESIS NETWORK
@@ -853,11 +1029,12 @@ export default function App() {
           </div>
         </section>
 
-        {/* 3. THREE AGENT CARDS */}
-        <section className="grid grid-cols-3 gap-4 h-[300px] shrink-0">
+        {/* 3. THREE AGENT CARDS + LOBSTER TRAP */}
+        <section className="grid grid-cols-4 gap-4 h-[300px] shrink-0">
           {agents.map((agent, i) => (
             <AgentCard key={agent.name} agent={agent} />
           ))}
+          <SecurityMonitor events={securityEvents} proxyOnline={proxyOnline} />
         </section>
 
         {/* 4. DIGITAL TWIN PANEL */}
@@ -939,7 +1116,7 @@ export default function App() {
         </div>
       </footer>
       <div className="h-6 shrink-0 flex items-center justify-center text-[8px] text-[var(--text)] opacity-30 font-mono tracking-[4px]">
-        PROJECT HELIX SYNTHGEN v1.0 — LABLAB.AI HACKATHON 2026 — BUILT ON GEMINI 2.0 FLASH
+        PROJECT HELIX SYNTHGEN v2.0 — LABLAB.AI HACKATHON 2026 — GEMINI 2.0 FLASH — SECURED BY LOBSTER TRAP
       </div>
     </div>
   );
